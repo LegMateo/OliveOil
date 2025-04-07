@@ -22,8 +22,3 @@ if table_name not in existing_tables:
         AttributeDefinitions=[{"AttributeName": "email", "AttributeType": "S"}],
         ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
     )
-
-    table.wait_until_exists()
-    print(f"✅ Table '{table_name}' created.")
-else:
-    print(f"✅ Table '{table_name}' already exists.")
