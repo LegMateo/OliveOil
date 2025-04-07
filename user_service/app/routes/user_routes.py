@@ -1,4 +1,11 @@
 from fastapi import APIRouter, HTTPException, Response, Request, Query
+from fastapi.responses import RedirectResponse
+from starlette.datastructures import URL
+import aiohttp
+import secrets
+
+import os
+
 
 from app.models import (
     RegisterRequest,
@@ -14,6 +21,7 @@ from app.auth import (
     create_access_token,
     create_refresh_token,
     verify_refresh_token,
+    set_auth_cookies,
 )
 from app.user_repository import (
     get_user_by_email,
@@ -24,6 +32,10 @@ from app.user_repository import (
 )
 
 router = APIRouter()
+
+GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
+GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
+GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
 
 
 @router.post("/register", response_model=AuthResponse)
@@ -55,6 +67,11 @@ async def login_user(request: LoginRequest, response: Response):
     hashed_password = existing_user.get("password") if existing_user else dummy_hash
     is_password_valid = verify_password(request.password, hashed_password)
 
+    if existing_user.get("auth_provider") == "google":
+        raise HTTPException(
+            status_code=400,
+            detail="Login failed. Please check your credentials or try another method.",
+        )
     if not existing_user or not is_password_valid:
         raise HTTPException(status_code=400, detail="Wrong e-mail or password")
 
@@ -139,3 +156,118 @@ def verify_email(token: str = Query(...)):
         raise HTTPException(
             status_code=400, detail="Invalid or expired verification token"
         )
+
+
+# GOOGLE
+
+
+@router.get("/google/login")
+async def google_login(response: Response):
+    state = secrets.token_urlsafe(16)
+    response.set_cookie("oauth_state", state, httponly=True)
+
+    params = {
+        "client_id": GOOGLE_CLIENT_ID,
+        "response_type": "code",
+        "scope": "openid email profile",
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "access_type": "offline",
+        "prompt": "consent",
+    }
+
+    url = URL("https://accounts.google.com/o/oauth2/v2/auth").include_query_params(
+        **params
+    )
+    return RedirectResponse(str(url))
+
+
+@router.get("/google/callback")
+async def google_callback(request: Request):
+    state_from_google = request.query_params.get("state")
+    expected_state = request.cookies.get("oauth_state")
+    code = request.query_params.get("code")
+
+    if state_from_google != expected_state:
+        raise HTTPException(status_code=400, detail="Invalid state token")
+
+    if not code:
+        raise HTTPException(status_code=400, detail="Missing code in callback")
+
+    token_url = "https://oauth2.googleapis.com/token"
+    data = {
+        "code": code,
+        "client_id": GOOGLE_CLIENT_ID,
+        "client_secret": GOOGLE_CLIENT_SECRET,
+        "redirect_uri": GOOGLE_REDIRECT_URI,
+        "grant_type": "authorization_code",
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(token_url, data=data) as resp:
+            if resp.status != 200:
+                raise HTTPException(
+                    status_code=resp.status, detail="Token request failed"
+                )
+            tokens = await resp.json()
+
+        access_token = tokens.get("access_token")
+        if not access_token:
+            raise HTTPException(status_code=400, detail="Missing access token")
+
+        async with session.get(
+            "https://www.googleapis.com/oauth2/v2/userinfo",
+            headers={"Authorization": f"Bearer {access_token}"},
+        ) as userinfo_resp:
+            if userinfo_resp.status != 200:
+                raise HTTPException(
+                    status_code=userinfo_resp.status, detail="Failed to fetch user info"
+                )
+
+            user_info = await userinfo_resp.json()
+
+    google_email = normalize_email(user_info.get("email"))
+    if not user_info.get("verified_email"):
+        raise HTTPException(status_code=400, detail="Google account email not verified")
+    existing_user = get_user_by_email(google_email)
+
+    if existing_user:
+        if existing_user.get("auth_provider") != "google":
+            raise HTTPException(
+                status_code=400,
+                detail="Login failed. Please check your credentials or try another method.",
+            )
+        else:
+            access_token = create_access_token(data={"sub": google_email})
+            refresh_token = create_refresh_token(data={"sub": google_email})
+
+            response = RedirectResponse(
+                url="http://localhost:8002/auth/success"
+            )  # Change with frontend route
+            set_auth_cookies(response, access_token, refresh_token)
+
+            return response
+    else:
+
+        create_user(
+            email=google_email,
+            name=user_info.get("name"),
+            hashed_password="",
+            is_verified=True,
+            auth_provider="google",
+        )
+
+        access_token = create_access_token(data={"sub": google_email})
+        refresh_token = create_refresh_token(data={"sub": google_email})
+
+        response = RedirectResponse(
+            url="http://localhost:8002/auth/success"
+        )  # Change with frontend route
+
+        set_auth_cookies(response, access_token, refresh_token)
+
+        return response
+
+
+@router.get("/success")
+def success_page():
+    return {"message": "Google login successful. Cookies should now be set."}

@@ -2,6 +2,8 @@ from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError
 import boto3
+from fastapi import Response
+
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
@@ -64,6 +66,27 @@ def verify_verification_token(token: str) -> str:
         return payload.get("sub")  # This is the email
     except JWTError:
         raise ValueError("Invalid or expired token")
+
+
+def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
+    response.set_cookie(
+        "access_token",
+        access_token,
+        domain=".opg-gheda.com",
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        max_age=900,
+    )
+    response.set_cookie(
+        "refresh_token",
+        refresh_token,
+        domain=".opg-gheda.com",
+        httponly=True,
+        secure=True,
+        samesite="Lax",
+        max_age=259200,
+    )
 
 
 def send_verification_email(email: str):

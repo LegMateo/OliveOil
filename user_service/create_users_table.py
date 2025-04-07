@@ -22,3 +22,7 @@ if table_name not in existing_tables:
         AttributeDefinitions=[{"AttributeName": "email", "AttributeType": "S"}],
         ProvisionedThroughput={"ReadCapacityUnits": 5, "WriteCapacityUnits": 5},
     )
+
+    # Wait for table to be ready
+    table.meta.client.get_waiter("table_exists").wait(TableName=table_name)
+    print(f"Table '{table_name}' is now active.")

@@ -27,16 +27,25 @@ def get_user_by_email(email: str):
     return response.get("Item")
 
 
-def create_user(email: str, name: str, hashed_password: str):
+def create_user(
+    email: str,
+    name: str,
+    hashed_password: str | None = None,
+    is_verified: bool = False,
+    auth_provider: str = "local",
+):
     table = get_user_table()
-    table.put_item(
-        Item={
-            "email": email,
-            "name": name,
-            "password": hashed_password,
-            "is_verified": False,
-        }
-    )
+    item = {
+        "email": email,
+        "name": name,
+        "is_verified": is_verified,
+        "auth_provider": auth_provider,
+    }
+
+    if hashed_password:  # only add password if it’s not None
+        item["password"] = hashed_password
+
+    table.put_item(Item=item)
 
 
 def mark_user_as_verified(email: str):
