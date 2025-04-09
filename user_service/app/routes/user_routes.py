@@ -1,27 +1,33 @@
+import re
 from fastapi import APIRouter, HTTPException, Response, Request, Query
 from fastapi.responses import RedirectResponse
 from starlette.datastructures import URL
 import aiohttp
 import secrets
-
 import os
 
+from app.db import get_user_table
 
 from app.models import (
     RegisterRequest,
     AuthResponse,
     LoginRequest,
     TokenRefreshResponse,
+    ForgotPasswordRequest,
+    ResetPasswordRequest,
 )
 from app.auth import (
     hash_password,
-    send_verification_email,
+    send_email_with_token,
     verify_verification_token,
     verify_password,
     create_access_token,
     create_refresh_token,
     verify_refresh_token,
     set_auth_cookies,
+    create_password_reset_token,
+    create_verification_token,
+    verify_password_reset_token,
 )
 from app.user_repository import (
     get_user_by_email,
@@ -45,8 +51,18 @@ def register_user(request: RegisterRequest):
         raise HTTPException(status_code=400, detail="Invalid email domain")
     normalized_email = normalize_email(request.email)
     existing_user = get_user_by_email(normalized_email)
+
     if existing_user:
-        raise HTTPException(status_code=400, detail="User already exists")
+        raise HTTPException(status_code=400, detail="Registration failed")
+    if (
+        len(request.password) < 8
+        or not re.search(r"[A-Z]", request.password)
+        or not re.search(r"\d", request.password)
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="Password must be at least 8 characters long, include an uppercase letter and a number.",
+        )
 
     hashed = hash_password(request.password)
     create_user(
@@ -54,8 +70,15 @@ def register_user(request: RegisterRequest):
         request.name,
         hashed,
     )
-    send_verification_email(request.email)
+    token = create_verification_token(request.email)
+    verification_link = f"http://localhost:8002/auth/verify-email?token={token}"
 
+    send_email_with_token(
+        email=request.email,
+        subject="Verify your email address",
+        link_template=verification_link,
+        body_text="Click the link below to verify your email address:",
+    )
     return {"message": "User registered successfully"}
 
 
@@ -131,7 +154,7 @@ def refresh_token(request: Request, response: Response):
 
 
 @router.post("/logout")
-def logout(request: Request, response: Response):
+def logout(response: Response):
     try:
         response.delete_cookie("access_token")
         response.delete_cookie("refresh_token")
@@ -147,10 +170,10 @@ def verify_email(token: str = Query(...)):
         user = get_user_by_email(email)
 
         if user.get("is_verified"):
-            return {"message": f"Email {email} is already verified"}
+            return {"message": "If the account exists, a verification email was sent."}
 
         mark_user_as_verified(email)
-        return {"message": f"Email {email} verified successfully"}
+        return {"message": "If the account exists, a verification email was sent."}
 
     except ValueError:
         raise HTTPException(
@@ -158,9 +181,97 @@ def verify_email(token: str = Query(...)):
         )
 
 
+@router.post("/resend-verification")
+def resend_verification_email(request: ForgotPasswordRequest):
+    normalized_email = normalize_email(request.email)
+    user = get_user_by_email(normalized_email)
+
+    if not user or user.get("is_verified") or user.get("auth_provider") == "google":
+        return {"message": "If the account exists, a verification email was sent."}
+
+    token = create_verification_token(request.email)
+    verification_link = f"http://localhost:8002/auth/verify-email?token={token}"
+
+    send_email_with_token(
+        email=request.email,
+        subject="Verify your email address",
+        link_template=verification_link,
+        body_text="Click the link below to verify your email address:",
+    )
+
+    return {"message": "If the account exists, a verification email was sent."}
+
+
+@router.post("/forgot-password")
+async def forgot_password(request: ForgotPasswordRequest):
+    domain = request.email.split("@")[1]
+
+    if not has_mx_record(domain):
+        raise HTTPException(status_code=400, detail="Invalid email domain")
+
+    normalized_email = normalize_email(request.email)
+    user = get_user_by_email(normalized_email)
+
+    if not user or user.get("auth_provider") == "google":
+        return {"message": "If that email exists, a reset link has been sent."}
+
+    token = create_password_reset_token(normalized_email)
+    reset_link = f"http://localhost:8002/auth/reset-password?token={token}"
+
+    send_email_with_token(
+        email=request.email,
+        subject="Reset your password",
+        link_template=reset_link,
+        body_text="Click the link below to reset your password:",
+    )
+
+    return {"message": "If that email exists, a reset link has been sent."}
+
+
+@router.post("/reset-password")
+def reset_password(request: ResetPasswordRequest):
+    try:
+
+        email = verify_password_reset_token(request.token)
+        user = get_user_by_email(email)
+
+        if not user.get("is_verified"):
+            raise HTTPException(
+                status_code=403,
+                detail="E-mail must be verified before resetting password",
+            )
+        if request.new_password != request.confirm_password:
+            raise HTTPException(status_code=400, detail="Passwords do not match")
+
+        if (
+            len(request.new_password) < 8
+            or not re.search(r"[A-Z]", request.new_password)
+            or not re.search(r"\d", request.new_password)
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail="Password must be at least 8 characters long, include an uppercase letter and a number.",
+            )
+
+        if not user or user.get("auth_provider") == "google":
+            raise HTTPException(status_code=400, detail="Invalid token or user")
+
+        hashed = hash_password(request.new_password)
+
+        table = get_user_table()
+        table.update_item(
+            Key={"email": email},
+            UpdateExpression="SET password = :pwd",
+            ExpressionAttributeValues={":pwd": hashed},
+        )
+
+        return {"message": "Password successfully reset"}
+
+    except ValueError:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+
+
 # GOOGLE
-
-
 @router.get("/google/login")
 async def google_login(response: Response):
     state = secrets.token_urlsafe(16)

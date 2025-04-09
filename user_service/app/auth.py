@@ -1,6 +1,6 @@
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
-from jose import jwt, JWTError
+from jose import jwt, JWTError, ExpiredSignatureError
 import boto3
 from fastapi import Response
 
@@ -19,6 +19,7 @@ def verify_password(password, hashed_password):
 SECRET_KEY = "your_secret_key"
 JWT_SECRET = "supersecret"
 ALGORITHM = "HS256"
+PASSWORD_RESET_EXPIRE_MINUTES = 15
 EMAIL_VERIFICATION_EXPIRE_MINUTES = 20
 ACCESS_TOKEN_EXPIRE_MINUTES = 30
 REFRESH_TOKEN_EXPIRE_MINUTES = 4320
@@ -68,6 +69,21 @@ def verify_verification_token(token: str) -> str:
         raise ValueError("Invalid or expired token")
 
 
+def verify_password_reset_token(token: str) -> str:
+    try:
+        payload = jwt.decode(token, JWT_SECRET, algorithms=[ALGORITHM])
+        print("Decoded payload:", payload)
+        print("Token type:", payload.get("type"))
+        print("Subject (email):", payload.get("sub"))
+        if payload.get("type") != "password_reset":
+            raise ValueError("Invalid token type")
+        return payload.get("sub")
+    except ExpiredSignatureError:
+        raise ValueError("Token has expired")
+    except JWTError:
+        raise ValueError("Invalid token")
+
+
 def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     response.set_cookie(
         "access_token",
@@ -89,20 +105,22 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     )
 
 
-def send_verification_email(email: str):
-    token = create_verification_token(email)
-    verification_link = f"http://localhost:8002/auth/verify-email?token={token}"
+def create_password_reset_token(email: str):
+    expire = datetime.now(timezone.utc) + timedelta(
+        minutes=PASSWORD_RESET_EXPIRE_MINUTES
+    )
+    payload = {"sub": email, "exp": expire, "type": "password_reset"}
+    return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
 
+
+def send_email_with_token(email: str, subject: str, link_template: str, body_text: str):
     ses = boto3.client("ses", region_name="eu-central-1")
+
     ses.send_email(
         Source="no-reply@opg-gheda.com",
         Destination={"ToAddresses": [email]},
         Message={
-            "Subject": {"Data": "Verify your email address"},
-            "Body": {
-                "Text": {
-                    "Data": f"Click the link to verify your email:\n{verification_link}"
-                }
-            },
+            "Subject": {"Data": subject},
+            "Body": {"Text": {"Data": f"{body_text}\n\n{link_template}"}},
         },
     )
