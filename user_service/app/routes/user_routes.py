@@ -5,6 +5,7 @@ from starlette.datastructures import URL
 import aiohttp
 import secrets
 import os
+import asyncio
 
 from app.db import get_user_table
 
@@ -18,7 +19,7 @@ from app.models import (
 )
 from app.auth import (
     hash_password,
-    send_email_with_token,
+    notify_email_verification,
     verify_verification_token,
     verify_password,
     create_access_token,
@@ -42,10 +43,12 @@ router = APIRouter()
 GOOGLE_CLIENT_ID = os.getenv("GOOGLE_CLIENT_ID")
 GOOGLE_CLIENT_SECRET = os.getenv("GOOGLE_CLIENT_SECRET")
 GOOGLE_REDIRECT_URI = os.getenv("GOOGLE_REDIRECT_URI")
+AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL")
+FRONTEND_SUCCESS_URL = os.getenv("FRONTEND_SUCCESS_URL")
 
 
 @router.post("/register", response_model=AuthResponse)
-def register_user(request: RegisterRequest):
+async def register_user(request: RegisterRequest):
     domain = request.email.split("@")[1]
     if not has_mx_record(domain):
         raise HTTPException(status_code=400, detail="Invalid email domain")
@@ -71,14 +74,12 @@ def register_user(request: RegisterRequest):
         hashed,
     )
     token = create_verification_token(request.email)
-    verification_link = f"http://localhost:8002/auth/verify-email?token={token}"
+    verification_link = f"{AUTH_SERVICE_URL}/auth/verify-email?token={token}"
 
-    send_email_with_token(
-        email=request.email,
-        subject="Verify your email address",
-        link_template=verification_link,
-        body_text="Click the link below to verify your email address:",
+    await notify_email_verification(
+        request.email, verification_link, type="account-verify"
     )
+
     return {"message": "User registered successfully"}
 
 
@@ -173,8 +174,7 @@ def verify_email(token: str = Query(...)):
             return {"message": "If the account exists, a verification email was sent."}
 
         mark_user_as_verified(email)
-        return {"message": "If the account exists, a verification email was sent."}
-
+        return {"message": "The account is successfully verified"}
     except ValueError:
         raise HTTPException(
             status_code=400, detail="Invalid or expired verification token"
@@ -182,7 +182,7 @@ def verify_email(token: str = Query(...)):
 
 
 @router.post("/resend-verification")
-def resend_verification_email(request: ForgotPasswordRequest):
+async def resend_verification_email(request: ForgotPasswordRequest):
     normalized_email = normalize_email(request.email)
     user = get_user_by_email(normalized_email)
 
@@ -190,13 +190,10 @@ def resend_verification_email(request: ForgotPasswordRequest):
         return {"message": "If the account exists, a verification email was sent."}
 
     token = create_verification_token(request.email)
-    verification_link = f"http://localhost:8002/auth/verify-email?token={token}"
+    verification_link = f"{AUTH_SERVICE_URL}/auth/verify-email?token={token}"
 
-    send_email_with_token(
-        email=request.email,
-        subject="Verify your email address",
-        link_template=verification_link,
-        body_text="Click the link below to verify your email address:",
+    await notify_email_verification(
+        request.email, verification_link, type="account-verify"
     )
 
     return {"message": "If the account exists, a verification email was sent."}
@@ -216,14 +213,9 @@ async def forgot_password(request: ForgotPasswordRequest):
         return {"message": "If that email exists, a reset link has been sent."}
 
     token = create_password_reset_token(normalized_email)
-    reset_link = f"http://localhost:8002/auth/reset-password?token={token}"
+    reset_link = f"{AUTH_SERVICE_URL}/auth/reset-password?token={token}"
 
-    send_email_with_token(
-        email=request.email,
-        subject="Reset your password",
-        link_template=reset_link,
-        body_text="Click the link below to reset your password:",
-    )
+    await notify_email_verification(request.email, reset_link, type="password-reset")
 
     return {"message": "If that email exists, a reset link has been sent."}
 
@@ -352,7 +344,7 @@ async def google_callback(request: Request):
             refresh_token = create_refresh_token(data={"sub": google_email})
 
             response = RedirectResponse(
-                url="http://localhost:8002/auth/success"
+                url=FRONTEND_SUCCESS_URL
             )  # Change with frontend route
             set_auth_cookies(response, access_token, refresh_token)
 
@@ -371,7 +363,7 @@ async def google_callback(request: Request):
         refresh_token = create_refresh_token(data={"sub": google_email})
 
         response = RedirectResponse(
-            url="http://localhost:8002/auth/success"
+            url=FRONTEND_SUCCESS_URL
         )  # Change with frontend route
 
         set_auth_cookies(response, access_token, refresh_token)

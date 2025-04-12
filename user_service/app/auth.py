@@ -1,8 +1,10 @@
+import os
 from passlib.context import CryptContext
 from datetime import datetime, timedelta, timezone
 from jose import jwt, JWTError, ExpiredSignatureError
 import boto3
 from fastapi import Response
+import aiohttp
 
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
@@ -16,13 +18,23 @@ def verify_password(password, hashed_password):
     return pwd_context.verify(password, hashed_password)
 
 
-SECRET_KEY = "your_secret_key"
-JWT_SECRET = "supersecret"
-ALGORITHM = "HS256"
-PASSWORD_RESET_EXPIRE_MINUTES = 15
-EMAIL_VERIFICATION_EXPIRE_MINUTES = 20
-ACCESS_TOKEN_EXPIRE_MINUTES = 30
-REFRESH_TOKEN_EXPIRE_MINUTES = 4320
+SECRET_KEY = os.getenv("SECRET_KEY")
+JWT_SECRET = os.getenv("JWT_SECRET")
+ALGORITHM = os.getenv("ALGORITHM")
+PASSWORD_RESET_EXPIRE_MINUTES = int(os.getenv("PASSWORD_RESET_EXPIRE_MINUTES", 15))
+EMAIL_VERIFICATION_EXPIRE_MINUTES = int(
+    os.getenv("EMAIL_VERIFICATION_EXPIRE_MINUTES", 20)
+)
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+REFRESH_TOKEN_EXPIRE_MINUTES = int(os.getenv("REFRESH_TOKEN_EXPIRE_MINUTES", 4320))
+COOKIE_DOMAIN = os.getenv("COOKIE_DOMAIN")
+EMAIL_SOURCE = os.getenv("EMAIL_SOURCE")
+AWS_REGION = os.getenv("AWS_REGION")
+
+
+NOTIFICATION_SERVICE_URL = os.getenv(
+    "NOTIFICATION_SERVICE_URL", "http://localhost:8003"
+)
 
 
 def create_access_token(data: dict):
@@ -88,7 +100,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     response.set_cookie(
         "access_token",
         access_token,
-        domain=".opg-gheda.com",
+        domain=COOKIE_DOMAIN,
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -97,7 +109,7 @@ def set_auth_cookies(response: Response, access_token: str, refresh_token: str):
     response.set_cookie(
         "refresh_token",
         refresh_token,
-        domain=".opg-gheda.com",
+        domain=COOKIE_DOMAIN,
         httponly=True,
         secure=True,
         samesite="Lax",
@@ -113,14 +125,14 @@ def create_password_reset_token(email: str):
     return jwt.encode(payload, JWT_SECRET, algorithm=ALGORITHM)
 
 
-def send_email_with_token(email: str, subject: str, link_template: str, body_text: str):
-    ses = boto3.client("ses", region_name="eu-central-1")
-
-    ses.send_email(
-        Source="no-reply@opg-gheda.com",
-        Destination={"ToAddresses": [email]},
-        Message={
-            "Subject": {"Data": subject},
-            "Body": {"Text": {"Data": f"{body_text}\n\n{link_template}"}},
-        },
-    )
+async def notify_email_verification(email: str, link: str, type: str):
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            f"{NOTIFICATION_SERVICE_URL}/notify/verify-email",
+            json={"email": email, "link": link, "type": type},
+        ) as response:
+            if response.status != 200:
+                text = await response.text()
+                raise Exception(
+                    f"Notification service error: {response.status} - {text}"
+                )
